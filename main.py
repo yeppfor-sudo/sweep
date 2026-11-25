@@ -3,8 +3,6 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import pandas as pd
-
 import config as C
 from data import symbols, klines, closed
 from sweep import find_sweep, check_breakout
@@ -32,6 +30,7 @@ def save_state(s):
 
 
 def scan(sym):
+    """Returns None (no 1D sweep) or dict; dict['sig'] is None if 4H breakout not yet."""
     try:
         d_full = klines(sym, "Day1", C.D1_BARS)
         if d_full is None:
@@ -42,12 +41,11 @@ def scan(sym):
             return None
         h_full = klines(sym, "Hour4", C.H4_BARS)
         if h_full is None:
-            return None
+            return {"sym": sym, "sw": sw, "sig": None}
         h4 = closed(h_full, 14400)
         sig = check_breakout(h4, sw)
-        if not sig:
-            return None
-        return {"sym": sym, "sw": sw, "sig": sig, "d_full": d_full, "h_full": h_full}
+        return {"sym": sym, "sw": sw, "sig": sig,
+                "d_full": d_full, "h_full": h_full}
     except Exception as e:
         print(sym, "error", e)
         return None
@@ -58,8 +56,16 @@ def main():
     syms = symbols()
     print("pairs:", len(syms))
     with ThreadPoolExecutor(C.WORKERS) as ex:
-        hits = [r for r in ex.map(scan, syms) if r]
+        res = [r for r in ex.map(scan, syms) if r]
+
+    waiting = [r for r in res if not r["sig"]]
+    hits = [r for r in res if r["sig"]]
     hits.sort(key=lambda r: r["sig"]["score"], reverse=True)
+
+    print("1D sweeps found (waiting for 4H EMA20 breakout):", len(waiting))
+    for r in waiting[:40]:
+        print("  waiting:", r["sym"], "sweep day", r["sw"]["time"].date(),
+              "score", round(r["sw"]["score"]))
     print("hits:", len(hits))
 
     sent = 0
