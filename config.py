@@ -1,46 +1,40 @@
 import os
 
-BASE = "https://contract.mexc.com"
+def env(*names):
+    for n in names:
+        v = os.getenv(n)
+        if v:
+            return v.strip()
+    return ""
 
-# timeframe -> number of daily candles per candle
-TIMEFRAMES = {"1d": 1, "2d": 2, "3d": 3, "5d": 5, "7d": 7}
-# how many closed candles back to look for liquidity levels
-LOOKBACK = {"1d": 30, "2d": 25, "3d": 20, "5d": 16, "7d": 14}
-# alert cutoff score per timeframe (higher timeframe = fewer, bigger candles)
-MIN_SCORE_TF = {"1d": 70, "2d": 66, "3d": 62, "5d": 55, "7d": 50}
+TG_TOKEN = env("TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN", "BOT_TOKEN")
+TG_CHAT = env("TELEGRAM_CHAT_ID", "TG_CHAT_ID", "CHAT_ID")
 
-PIVOT_K = 2
-HISTORY_DAYS = 900
+BASE = "https://contract.mexc.com/api/v1"
+EXCLUDE = set()          # koi symbol hatana ho to yahan likho, e.g. {"XYZ_USDT"}
 
-# sweep candle gates
-MIN_WICK = 0.40
-MIN_CLOSE_POS = 0.50
-MIN_RANGE_ATR = 0.8
-MIN_DEPTH_ATR = 0.10
-MAX_DEPTH_ATR = 3.0
-EQL_TOL_ATR = 0.25
-SL_BUFFER_ATR = 0.10
-MAX_RISK_ATR = 4.0
+# 1D sweep rules
+SWEEP_LOOKBACK = 20       # pichle 20 daily candles ka low
+SWEEP_MAX_AGE_DAYS = 3    # sweep pichli 3 closed daily candles me hona chahiye
+MIN_SWEEP_DEPTH = 0.003   # low ko level se kam az kam 0.3% neeche jana chahiye
+MIN_WICK_RATIO = 0.45     # neeche wick candle range ka kam az kam 45%
 
-MAX_AGE_HOURS = float(os.getenv("MAX_AGE_HOURS", "30"))
-TOP_N = int(os.getenv("TOP_N", "25"))
-WORKERS = int(os.getenv("WORKERS", "4"))
-RATE_SLEEP = float(os.getenv("RATE_SLEEP", "0.25"))
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+# 4H breakout rules
+EMA_LEN = 20
+MIN_BODY_RATIO = 0.40
+MAX_ALERT_AGE_HOURS = 5   # purane (stale) alert nahi
 
-TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-WATERMARK = "RANJHA"
+# Trade levels
+SL_BUFFER = 0.001         # sweep low ke 0.1% neeche
+MAX_SL_PCT = 0.15         # SL 15% se door ho to skip
+TP1_R = 1.5
+TP2_R = 3.0
 
-# crypto only: skip stock / ETF / metal contracts
-EXCLUDE_WORDS = ("stock", "etf", "metal", "forex", "commodity")
-EXCLUDE_BASE = {
-    "XAU", "XAG", "XPT", "XPD", "TSLA", "NVDA", "AAPL", "MSFT", "GOOGL",
-    "AMZN", "COIN", "MSTR", "HOOD", "CRCL", "CRWV", "PLTR", "SPY", "QQQ",
-    "GLD", "SLV", "IWM", "NFLX", "AMD", "INTC", "BABA", "TSM", "ORCL",
-    "UBER", "DIS", "NKE", "PYPL", "SHOP", "SNOW", "ARM", "AVGO", "LLY",
-}
-
+MIN_SCORE = 50
+MAX_ALERTS_PER_RUN = 15
+WORKERS = 4
+D1_BARS = 120
+H4_BARS = 200
 
 def fmt(p):
-    return f"{p:.6g}"
+    return f"{p:.8g}"
