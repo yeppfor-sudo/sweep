@@ -1,88 +1,105 @@
+import json
+import os
 import time
-import concurrent.futures as cf
-from config import *
-from data import list_symbols, fetch_daily, resample
-from sweep import detect
+from concurrent.futures import ThreadPoolExecutor
+
+import pandas as pd
+
+import config as C
+from data import symbols, klines, closed
+from sweep import find_sweep, check_breakout
 from chart import make_chart
-from notify import (load_state, save_state, caption, send_photo, send_text)
+from notify import send_photo
+
+STATE = "state/bull_sweep_sent.json"
+F = C.fmt
 
 
-def cutoff(tf):
-    return 40 if TEST_MODE else MIN_SCORE_TF[tf]
+def load_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
-def work(sym):
-    time.sleep(RATE_SLEEP)
-    df = fetch_daily(sym)
-    if df is None or len(df) < 60 or df["vol"].tail(20).sum() <= 0:
-        return []
-    out = []
-    for tf, n in TIMEFRAMES.items():
-        closed, full = resample(df, n)
-        for s in detect(sym, tf, closed, full):
-            cut = cutoff(tf)
-            if s["score"] >= cut:
-                s["cut"] = cut
-                s["grade"] = ("A" if s["score"] >= cut
-                              else "B" if s["score"] >= cut - 10 else "C")
-                s["_full"] = full
-                out.append(s)
-    return out
+def save_state(s):
+    os.makedirs("state", exist_ok=True)
+    cutoff = time.time() - 30 * 86400
+    s = {k: v for k, v in s.items() if v > cutoff}
+    with open(STATE, "w") as f:
+        json.dump(s, f)
+
+
+def scan(sym):
+    try:
+        d_full = klines(sym, "Day1", C.D1_BARS)
+        if d_full is None:
+            return None
+        d1 = closed(d_full, 86400)
+        sw = find_sweep(d1)
+        if not sw:
+            return None
+        h_full = klines(sym, "Hour4", C.H4_BARS)
+        if h_full is None:
+            return None
+        h4 = closed(h_full, 14400)
+        sig = check_breakout(h4, sw)
+        if not sig:
+            return None
+        return {"sym": sym, "sw": sw, "sig": sig, "d_full": d_full, "h_full": h_full}
+    except Exception as e:
+        print(sym, "error", e)
+        return None
 
 
 def main():
-    syms, skipped = list_symbols()
-    print(f"Scanning {len(syms)} crypto USDT perps (skipped {len(skipped)} non-crypto)")
-    print("Cutoffs:", MIN_SCORE_TF if not TEST_MODE else "TEST MODE (40)")
-    results = []
-    with cf.ThreadPoolExecutor(WORKERS) as ex:
-        futs = {ex.submit(work, s): s for s in syms}
-        for f in cf.as_completed(futs):
-            try:
-                results += f.result()
-            except Exception as e:
-                print("error", futs[f], e)
+    state = load_state()
+    syms = symbols()
+    print("pairs:", len(syms))
+    with ThreadPoolExecutor(C.WORKERS) as ex:
+        hits = [r for r in ex.map(scan, syms) if r]
+    hits.sort(key=lambda r: r["sig"]["score"], reverse=True)
+    print("hits:", len(hits))
 
-    now = time.time()
-    st = load_state()
-    fresh = []
-    for s in results:
-        s["age_h"] = (now - s["end"]) / 3600
-        s["key"] = f"{s['symbol']}|{s['tf']}|{s['side']}|{s['start']}"
-        if not TEST_MODE:
-            if s["age_h"] > MAX_AGE_HOURS or s["key"] in st:
-                continue
-        fresh.append(s)
-    # rank by how far above its own timeframe cutoff
-    fresh.sort(key=lambda x: -(x["score"] - x["cut"]))
-    fresh = fresh[: (3 if TEST_MODE else TOP_N)]
-    print(f"{len(results)} raw signals, {len(fresh)} to send")
+    sent = 0
+    for r in hits:
+        if sent >= C.MAX_ALERTS_PER_RUN:
+            break
+        sym, sw, sig = r["sym"], r["sw"], r["sig"]
+        key = f"{sym}|{sw['time']}"
+        if key in state:
+            continue
+        name = sym.replace("_", "")
+        p4 = f"/tmp/{name}_4h.png"
+        p1 = f"/tmp/{name}_1d.png"
+        make_chart(r["h_full"], f"{name} 4H - EMA20 breakout", p4, [
+            ("Entry", sig["entry"], "#2563eb"),
+            ("SL", sig["sl"], "#dc2626"),
+            ("TP1", sig["tp1"], "#16a34a"),
+            ("TP2", sig["tp2"], "#15803d"),
+        ], bars=120, ema_len=C.EMA_LEN)
+        make_chart(r["d_full"], f"{name} 1D - liquidity sweep", p1, [
+            ("Swept low", sw["level"], "#7c3aed"),
+            ("Sweep wick low", sw["low"], "#dc2626"),
+        ], bars=80)
+        cap = (
+            f"🟢 <b>BULLISH: 1D SWEEP + 4H EMA20 BREAKOUT</b>\n"
+            f"<b>{name}</b>  |  Score {sig['score']:.0f}\n"
+            f"1D sweep: {sw['time']:%Y-%m-%d} (swept {F(sw['level'])}, wick low {F(sw['low'])})\n"
+            f"Entry: {F(sig['entry'])}\n"
+            f"SL: {F(sig['sl'])} (-{sig['risk_pct']:.1f}%)\n"
+            f"TP1: {F(sig['tp1'])} ({C.TP1_R}R)\n"
+            f"TP2: {F(sig['tp2'])} ({C.TP2_R}R)"
+        )
+        send_photo(p4, cap)
+        send_photo(p1, f"{name} - 1D sweep chart")
+        state[key] = time.time()
+        sent += 1
+        time.sleep(1)
 
-    sent = []
-    for s in fresh:
-        try:
-            img = make_chart(s["_full"], s)
-            if send_photo(img, caption(s)):
-                sent.append(s)
-                if not TEST_MODE:
-                    st[s["key"]] = now
-            time.sleep(1.3)
-        except Exception as e:
-            print("send error", s["symbol"], e)
-
-    if not TEST_MODE:
-        save_state(st)
-
-    if sent:
-        lines = ["<b>Liquidity sweep summary</b>"]
-        for s in sent:
-            e = "🟢" if s["side"] == "long" else "🔴"
-            lines.append(f"{e} {s['symbol']} {s['tf'].upper()} - "
-                         f"{s['grade']} ({s['score']})")
-        send_text("\n".join(lines))
-    elif TEST_MODE:
-        send_text(f"Test finished: scanned {len(syms)} pairs, "
-                  f"{len(results)} signals found, none sent.")
+    save_state(state)
+    print("alerts sent:", sent)
 
 
 if __name__ == "__main__":
